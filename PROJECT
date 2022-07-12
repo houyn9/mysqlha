@@ -1,0 +1,16 @@
+domain: emergen.cn
+layout:
+- go.kubebuilder.io/v3
+projectName: mysqlha
+repo: mysqlha
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: emergen.cn
+  group: paasapp
+  kind: Mysqlha
+  path: mysqlha/api/v1
+  version: v1
+version: "3"

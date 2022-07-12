@@ -1,0 +1,10 @@
+apiVersion: paasapp.emergen.cn/v1
+kind: Mysqlha
+metadata:
+  name: mysqlha-sample
+  namespace: dev
+spec:
+  storageclass: managed-nfs-storage
+  repl: 2
+  rootpasswd: 123456
+  # TODO(user): Add fields here

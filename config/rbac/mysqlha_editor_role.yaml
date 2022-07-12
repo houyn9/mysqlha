@@ -1,0 +1,24 @@
+# permissions for end users to edit mysqlhas.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mysqlha-editor-role
+rules:
+- apiGroups:
+  - paasapp.emergen.cn
+  resources:
+  - mysqlhas
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - paasapp.emergen.cn
+  resources:
+  - mysqlhas/status
+  verbs:
+  - get
