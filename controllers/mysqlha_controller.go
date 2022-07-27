@@ -18,13 +18,16 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"github.com/go-logr/logr"
 	v1 "k8s.io/api/apps/v1"
 	v13 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -90,11 +93,19 @@ func (r *MysqlhaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	//service逻辑
 	service := &v13.Service{}
 	svc := newsvc(mysqlha)
+	svcha1 := newsvcha1(mysqlha)
+	svcha2 := newsvcha2(mysqlha)
 	if err := controllerutil.SetControllerReference(mysqlha, svc, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := controllerutil.SetControllerReference(mysqlha, svcha2, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := controllerutil.SetControllerReference(mysqlha, svcha1, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: mysqlha.Namespace, Name: mysqlha.Name}, service); errors.IsNotFound(err) {
-		logger.Info("found none service,create now")
+		logger.Info("found none headless-service,create now")
 		if err := r.Create(ctx, svc); err != nil {
 			logger.Error(err, "create service failed")
 			return ctrl.Result{}, err
@@ -102,9 +113,90 @@ func (r *MysqlhaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	} else if err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: mysqlha.Namespace, Name: mysqlha.Name + "np"}, service); errors.IsNotFound(err) {
+		logger.Info("found none nodeport-service,create now")
+		if err := r.Create(ctx, svcha2); err != nil {
+			logger.Error(err, "create service failed")
+			return ctrl.Result{}, err
+		}
+	} else if err != nil {
+		return ctrl.Result{}, err
+	}
+	podlist := &v13.PodList{}
+	lbs := labels.Set{"app": req.Name}
+	var existPodNames []string
 
+	//patchData := map[string]interface{}{
+	//	"spec": map[string]interface{}{
+	//		"selector": map[string]string{
+	//			"app":                                mysqlha.Name,
+	//			"statefulset.kubernetes.io/pod-name": "mysqlha-0",
+	//		},
+	//	},
+	//}
+	//patchByte, _ := json.Marshal(patchData)
+
+	if err := r.Client.List(ctx, podlist, &client.ListOptions{
+		Namespace: req.Namespace, LabelSelector: labels.SelectorFromSet(lbs)}); err == nil {
+		fmt.Println(len(podlist.Items))
+
+		for v, pod := range podlist.Items {
+			if pod.GetObjectMeta().GetDeletionTimestamp() != nil {
+				continue
+			}
+			if pod.Status.Phase == v13.PodRunning || pod.Status.Phase == v13.PodPending {
+				fmt.Println(v, pod.GetObjectMeta().GetName())
+				existPodNames = append(existPodNames, pod.GetObjectMeta().GetName())
+
+			}
+		}
+		if len(existPodNames) > 1 {
+			for v, pod := range existPodNames {
+				if v == 1 {
+					if pod == "mysqlha-0" {
+						if err := r.Client.Patch(ctx, svcha1, client.MergeFrom(svcha2)); err != nil {
+							logger.Error(err, "update nodeport-service failed")
+							return ctrl.Result{}, err
+						}
+					} else {
+						logger.Info("mysqlha-0监测失败，删除svc")
+						if err := r.Client.Delete(ctx, svcha1); err != nil {
+							logger.Error(err, "delete service mysqlhanp-0 failed")
+							return ctrl.Result{}, err
+						}
+					}
+				}
+			}
+
+		} else if len(existPodNames) <= 1 {
+			for v, pod := range existPodNames {
+				if v == 0 {
+					if pod == "mysqlha-0" {
+						if err := r.Client.Patch(ctx, svcha1, client.MergeFrom(svcha2)); err != nil {
+							logger.Error(err, "update nodeport-service failed")
+							return ctrl.Result{}, err
+						}
+					} else {
+						logger.Info("mysqlha-0监测失败，删除svc")
+						if err := r.Client.Patch(ctx, svcha2, client.MergeFrom(svcha1)); err != nil {
+							logger.Error(err, "delete service mysqlhanp-0 failed")
+							return ctrl.Result{}, err
+						}
+					}
+				}
+			}
+
+		}
+		logger.Info(fmt.Sprintf("newexistpod: %s", existPodNames))
+
+	} else if err != nil {
+		return ctrl.Result{}, err
+	}
 	//statefulset逻辑
 	statefulSet := &v1.StatefulSet{}
+	//if err := r.Get(ctx, req.NamespacedName, statefulSet); err == nil {
+	//	fmt.Println(r.Get(ctx, req.NamespacedName, statefulSet))
+	//}
 	stateful := newstateful(mysqlha)
 	if err := controllerutil.SetControllerReference(mysqlha, stateful, r.Scheme); err != nil {
 		logger.Info("scale up failed: setcontrollerreference")
@@ -125,6 +217,7 @@ func (r *MysqlhaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	return ctrl.Result{}, nil
 }
+
 func newconfigmap(cr *paasappv1.Mysqlha) *v13.ConfigMap {
 	return &v13.ConfigMap{
 		ObjectMeta: v12.ObjectMeta{
@@ -155,6 +248,54 @@ func newsvc(cr *paasappv1.Mysqlha) *v13.Service {
 			},
 			ClusterIP: "None",
 			Selector:  map[string]string{"app": cr.Name},
+		},
+	}
+}
+func newsvcha1(cr *paasappv1.Mysqlha) *v13.Service {
+	return &v13.Service{
+		ObjectMeta: v12.ObjectMeta{
+			Name:      cr.Name + "np",
+			Namespace: cr.Namespace,
+			Labels:    map[string]string{"app": cr.Name},
+		},
+		Spec: v13.ServiceSpec{
+			Ports: []v13.ServicePort{
+				{
+					Name:     "mysql",
+					Port:     3306,
+					Protocol: "TCP",
+					TargetPort: intstr.IntOrString{
+						IntVal: 3306,
+					},
+					NodePort: 30306,
+				},
+			},
+			Selector: map[string]string{"app": cr.Name, "statefulset.kubernetes.io/pod-name": "mysqlha-0"},
+			Type:     "NodePort",
+		},
+	}
+}
+func newsvcha2(cr *paasappv1.Mysqlha) *v13.Service {
+	return &v13.Service{
+		ObjectMeta: v12.ObjectMeta{
+			Name:      cr.Name + "np",
+			Namespace: cr.Namespace,
+			Labels:    map[string]string{"app": cr.Name},
+		},
+		Spec: v13.ServiceSpec{
+			Ports: []v13.ServicePort{
+				{
+					Name:     "mysql",
+					Port:     3306,
+					Protocol: "TCP",
+					TargetPort: intstr.IntOrString{
+						IntVal: 3306,
+					},
+					NodePort: 30306,
+				},
+			},
+			Selector: map[string]string{"app": cr.Name, "statefulset.kubernetes.io/pod-name": "mysqlha-1"},
+			Type:     "NodePort",
 		},
 	}
 }
